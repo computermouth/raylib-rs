@@ -43,6 +43,16 @@ impl Rectangle {
     }
 }
 
+/// Check if circle collides with a line created betweeen two points [p1] and [p2]
+pub fn check_collision_circle_line(
+    center: impl Into<ffi::Vector2>,
+    radius: f32,
+    p1: impl Into<ffi::Vector2>,
+    p2: impl Into<ffi::Vector2>,
+) -> bool {
+    unsafe { ffi::CheckCollisionCircleLine(center.into(), radius, p1.into(), p2.into()) }
+}
+
 // Collision Handling
 /// Checks collision between two circles.
 #[inline]

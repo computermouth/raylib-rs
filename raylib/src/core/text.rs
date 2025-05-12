@@ -7,16 +7,27 @@ use crate::core::texture::{Image, Texture2D};
 use crate::core::{RaylibHandle, RaylibThread};
 use crate::ffi;
 use crate::math::Rectangle;
+use crate::error::LoadFontError;
 
-use std::convert::{AsMut, AsRef};
+use std::convert::{AsMut, AsRef, TryInto};
 use std::ffi::{CString, OsString};
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
 
 fn no_drop<T>(_thing: T) {}
-make_thin_wrapper!(Font, ffi::Font, ffi::UnloadFont);
+make_thin_wrapper!(
+    /// Font, font texture and GlyphInfo array data
+    Font,
+    ffi::Font,
+    ffi::UnloadFont
+);
 make_thin_wrapper!(WeakFont, ffi::Font, no_drop);
-make_thin_wrapper!(GlyphInfo, ffi::GlyphInfo, no_drop);
+make_thin_wrapper!(
+    /// GlyphInfo, font characters glyphs info
+    GlyphInfo,
+    ffi::GlyphInfo,
+    no_drop
+);
 
 #[repr(transparent)]
 #[derive(Debug)]
@@ -95,6 +106,7 @@ impl Drop for Codepoints {
 }
 
 impl RaylibHandle {
+    /// Load all codepoints from a UTF-8 text string, codepoints count returned by parameter
     pub(crate) fn load_codepoints(&mut self, text: &str) -> Codepoints {
         let ptr = CString::new(text).unwrap();
         let mut len = 0;
@@ -107,25 +119,25 @@ impl RaylibHandle {
         }
     }
 
+    /// Get total number of codepoints in a UTF-8 encoded string
     pub fn get_codepoint_count(text: &str) -> i32 {
         let ptr = CString::new(text).unwrap();
         unsafe { ffi::GetCodepointCount(ptr.as_ptr()) }
     }
 
+    /// Unload font from GPU memory (VRAM)
+    #[inline]
     pub fn unload_font(&mut self, font: WeakFont) {
         unsafe { ffi::UnloadFont(font.0) };
     }
 
     /// Loads font from file into GPU memory (VRAM).
     #[inline]
-    pub fn load_font(&mut self, _: &RaylibThread, filename: &str) -> Result<Font, String> {
+    pub fn load_font(&mut self, _: &RaylibThread, filename: &str) -> Result<Font, LoadFontError> {
         let c_filename = CString::new(filename).unwrap();
         let f = unsafe { ffi::LoadFont(c_filename.as_ptr()) };
         if f.glyphs.is_null() || f.texture.id == 0 {
-            return Err(format!(
-                "Error loading font {}. Does it exist? Is it the right type?",
-                filename
-            ));
+            return Err(LoadFontError::LoadFromFileFailed { path: filename.into() });
         }
         Ok(Font(f))
     }
@@ -139,7 +151,7 @@ impl RaylibHandle {
         filename: &str,
         font_size: i32,
         chars: Option<&str>,
-    ) -> Result<Font, String> {
+    ) -> Result<Font, LoadFontError> {
         let c_filename = CString::new(filename).unwrap();
         let f = unsafe {
             match chars {
@@ -156,10 +168,7 @@ impl RaylibHandle {
             }
         };
         if f.glyphs.is_null() || f.texture.id == 0 {
-            return Err(format!(
-                "Error loading font {}. Does it exist? Is it the right type?",
-                filename
-            ));
+            return Err(LoadFontError::LoadFromFileFailed { path: filename.into() });
         }
         Ok(Font(f))
     }
@@ -172,10 +181,10 @@ impl RaylibHandle {
         image: &Image,
         key: impl Into<ffi::Color>,
         first_char: i32,
-    ) -> Result<Font, String> {
+    ) -> Result<Font, LoadFontError> {
         let f = unsafe { ffi::LoadFontFromImage(image.0, key.into(), first_char) };
         if f.glyphs.is_null() {
-            return Err(format!("Error loading font from image."));
+            return Err(LoadFontError::LoadFromImageFailed);
         }
         Ok(Font(f))
     }
@@ -190,7 +199,7 @@ impl RaylibHandle {
         file_data: &[u8],
         font_size: i32,
         chars: Option<&str>,
-    ) -> Result<Font, String> {
+    ) -> Result<Font, LoadFontError> {
         let c_file_type = CString::new(file_type).unwrap();
         let f = unsafe {
             match chars {
@@ -216,9 +225,7 @@ impl RaylibHandle {
             }
         };
         if f.glyphs.is_null() || f.texture.id == 0 {
-            return Err(format!(
-                "Error loading font from memory. Is it the right type?"
-            ));
+            return Err(LoadFontError::LoadFromMemoryFailed);
         }
         Ok(Font(f))
     }
@@ -270,12 +277,18 @@ impl RaylibFont for WeakFont {}
 impl RaylibFont for Font {}
 
 pub trait RaylibFont: AsRef<ffi::Font> + AsMut<ffi::Font> {
+    /// Base size (default chars height)
+    #[inline]
     fn base_size(&self) -> i32 {
         self.as_ref().baseSize
     }
+    /// Texture atlas containing the glyphs
+    #[inline]
     fn texture(&self) -> &Texture2D {
         unsafe { std::mem::transmute(&self.as_ref().texture) }
     }
+    /// Glyphs info data
+    #[inline]
     fn chars(&self) -> &[GlyphInfo] {
         unsafe {
             std::slice::from_raw_parts(
@@ -284,6 +297,8 @@ pub trait RaylibFont: AsRef<ffi::Font> + AsMut<ffi::Font> {
             )
         }
     }
+    /// Glyphs info data
+    #[inline]
     fn chars_mut(&mut self) -> &mut [GlyphInfo] {
         unsafe {
             std::slice::from_raw_parts_mut(
@@ -292,13 +307,15 @@ pub trait RaylibFont: AsRef<ffi::Font> + AsMut<ffi::Font> {
             )
         }
     }
-    /// Check if a font is ready
-    fn is_ready(&self) -> bool {
-        unsafe { ffi::IsFontReady(*self.as_ref()) }
+
+    /// Check if a font is valid
+    #[inline]
+    fn is_font_valid(&self) -> bool {
+        unsafe { ffi::IsFontValid(*self.as_ref()) }
     }
 
     /// Export font as code file, returns true on success
-    fn export_as_code<A>(&self, filename: A) -> bool
+    fn export_font_as_code<A>(&self, filename: A) -> bool
     where
         A: Into<OsString>,
     {
@@ -307,16 +324,19 @@ pub trait RaylibFont: AsRef<ffi::Font> + AsMut<ffi::Font> {
     }
 
     /// Get glyph font info data for a codepoint (unicode character), fallback to '?' if not found
+    #[inline]
     fn get_glyph_info(&self, codepoint: char) -> GlyphInfo {
         unsafe { GlyphInfo(ffi::GetGlyphInfo(*self.as_ref(), codepoint as i32)) }
     }
 
     /// Gets index position for a unicode character on `font`.
+    #[inline]
     fn get_glyph_index(&self, codepoint: char) -> i32 {
         unsafe { ffi::GetGlyphIndex(*self.as_ref(), codepoint as i32) }
     }
 
     /// Get glyph rectangle in font atlas for a codepoint (unicode character), fallback to '?' if not found
+    #[inline]
     fn get_glyph_atlas_rec(&self, codepoint: char) -> Rectangle {
         unsafe { ffi::GetGlyphAtlasRec(*self.as_ref(), codepoint as i32).into() }
     }
@@ -340,7 +360,7 @@ impl Font {
         base_size: i32,
         padding: i32,
         pack_method: i32,
-    ) -> Result<Font, String> {
+    ) -> Result<Font, LoadFontError> {
         let f = unsafe {
             let mut f = std::mem::zeroed::<Font>();
             f.baseSize = base_size;
@@ -359,7 +379,7 @@ impl Font {
             f
         };
         if f.0.glyphs.is_null() || f.0.texture.id == 0 {
-            return Err(format!("Error loading font from image."));
+            return Err(LoadFontError::LoadFromImageFailed);
         }
         Ok(f)
     }
@@ -369,7 +389,7 @@ impl Font {
         unsafe {
             self.glyphCount = chars.len() as i32;
             let data_size = self.glyphCount as usize * std::mem::size_of::<ffi::GlyphInfo>();
-            let ci_arr_ptr = libc::malloc(data_size); // raylib frees this data in UnloadFont
+            let ci_arr_ptr = ffi::MemAlloc(data_size.try_into().unwrap()); // raylib frees this data in UnloadFont
             std::ptr::copy(
                 chars.as_ptr(),
                 ci_arr_ptr as *mut ffi::GlyphInfo,
@@ -413,7 +433,7 @@ pub fn gen_image_font_atlas(
         #[allow(clippy::uninit_vec)]
         recs.set_len(chars.len());
         std::ptr::copy(ptr, recs.as_mut_ptr(), chars.len());
-        ffi::MemFree(ptr as *mut libc::c_void);
+        ffi::MemFree(ptr as *mut ::std::os::raw::c_void);
         return (img, recs);
     }
 }
@@ -431,6 +451,8 @@ impl RaylibHandle {
         unsafe { ffi::MeasureText(c_text.as_ptr(), font_size) }
     }
 
+    /// Set vertical line spacing when drawing with line-breaks
+    #[inline]
     pub fn set_text_line_spacing(&self, spacing: i32) {
         unsafe { ffi::SetTextLineSpacing(spacing) }
     }
